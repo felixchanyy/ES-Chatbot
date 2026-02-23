@@ -1,44 +1,37 @@
-# backend/routers/chat.py
+from fastapi import APIRouter, HTTPException
 
-from fastapi import APIRouter
-from models.schemas import ChatRequest, ChatResponse
+from models.schemas import ChatRequest, ChatResponse, QueryMetadata
 from services.query_generator import QueryGenerator, QueryGenerationError
 
 router = APIRouter()
+query_gen = QueryGenerator()
 
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
-    Milestone 2: Query Generation Pipeline
-    - Translate a plain-English question into an Elasticsearch query dict.
-    - Return the generated query in query_metadata.es_query.
-    - No safety layer yet, and NO execution against Elasticsearch.
+    Milestone 2:
+    Generate ES query JSON and return it.
+    No execution yet.
     """
-    query_generator = QueryGenerator()
+
     try:
-        es_query = query_generator.generate(request.message, [h.model_dump() for h in request.history])
-    except QueryGenerationError as e:
+        es_query = query_gen.generate(request.message, request.history)
+
         return ChatResponse(
-            response=f"I couldn't generate an Elasticsearch query for that request. Reason: {str(e)}",
-            query_metadata={
-                "es_query": None,
-                "total_hits": None,
-                "execution_time_ms": None,
-                "safety_status": "blocked",
-                "blocked_reason": "query_generation_error",
-            },
+            response="Elasticsearch query successfully generated.",
+            query_metadata=QueryMetadata(
+                es_query=es_query,
+                total_hits=None,
+                execution_time_ms=None,
+                safety_status="allowed",  # Required by schema
+                blocked_reason=None
+            ),
             session_id=request.session_id,
         )
 
-    return ChatResponse(
-        response="Generated an Elasticsearch query for your request.",
-        query_metadata={
-            "es_query": es_query,
-            "total_hits": None,
-            "execution_time_ms": None,
-            "safety_status": "allowed",
-            "blocked_reason": None,
-        },
-        session_id=request.session_id,
-    )
+    except QueryGenerationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
