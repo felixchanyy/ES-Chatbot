@@ -1,25 +1,18 @@
+# backend/services/query_generator.py
+
 import json
 import re
+from datetime import datetime  # 1. Add this import
 from typing import Any, Dict, List, Optional
-
 from langchain_openai import ChatOpenAI
 from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
-
 from config import settings
-
 
 class QueryGenerationError(Exception):
     pass
 
-
 class QueryGenerator:
-    """
-    Milestone 2:
-    Natural language -> Elasticsearch query JSON.
-    No execution, no safety enforcement yet.
-    """
-
     def __init__(self) -> None:
         self.llm = ChatOpenAI(
             openai_api_base=settings.llm_base_url,
@@ -27,7 +20,6 @@ class QueryGenerator:
             model_name=settings.llm_model_name,
             temperature=0,
         )
-
         self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
         self.vectorstore = Chroma(
             collection_name="gkg_mapping",
@@ -35,9 +27,13 @@ class QueryGenerator:
             persist_directory="./chroma_db",
         )
 
-    def _build_system_prompt(self, schema_context: str) -> str:
+    # 2. Update to accept current_time
+    def _build_system_prompt(self, schema_context: str, current_time: str) -> str:
         return f"""
     You are an OSINT Assistant. Convert the user's question into a valid Elasticsearch JSON query.
+
+    ### CONTEXT:
+    Current Date and Time: {current_time}
 
     ### APPENDIX A FIELD REFERENCE:
     - Time: 'V21Date'
@@ -66,9 +62,7 @@ class QueryGenerator:
     def _parse_json(self, text: str) -> Dict[str, Any]:
         if not text:
             raise QueryGenerationError("Empty LLM output.")
-
         cleaned = text.strip().replace("```json", "").replace("```", "").strip()
-
         try:
             return json.loads(cleaned)
         except json.JSONDecodeError:
@@ -81,14 +75,16 @@ class QueryGenerator:
             raise QueryGenerationError("LLM did not return valid JSON.")
 
     def generate(self, question: str, history: Optional[List[Dict]] = None) -> Dict[str, Any]:
+        # 3. Calculate current time
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
         docs = self.vectorstore.similarity_search(question, k=6)
         schema_context = "\n".join([d.page_content for d in docs]) if docs else ""
 
         messages = [
-            {"role": "system", "content": self._build_system_prompt(schema_context)},
+            {"role": "system", "content": self._build_system_prompt(schema_context, now)},
             {"role": "user", "content": question},
         ]
 
         response = self.llm.invoke(messages)
-
         return self._parse_json(response.content)

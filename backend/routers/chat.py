@@ -63,29 +63,18 @@ async def chat(request: ChatRequest):
     safe_query = validation.query
 
     # 3) Execute query
-    # try:
-    #     es_resp = await es.search(safe_query)
-    # except Exception:
-    #     # Avoid leaking raw ES error details to caller.
-    #     return ChatResponse(
-    #         response="The data store is currently unavailable or the query failed to execute. Please try again later.",
-    #         query_metadata=QueryMetadata(
-    #             es_query=safe_query if validation.status != SafetyStatus.BLOCKED else None,
-    #             total_hits=None,
-    #             execution_time_ms=None,
-    #             safety_status=validation.status.value,
-    #             blocked_reason=None,
-    #         ),
-    #         session_id=request.session_id,
-    #     )
     try:
         es_resp = await es.search(index=settings.es_index, query=safe_query)
     except Exception as e:
         logger.exception("Elasticsearch execution failed: %s", e)
         return ChatResponse(
-            message="The data store is currently unavailable or the query failed to execute. Please try again later.",
-            safety_status="error",
-            query_metadata=QueryMetadata(es_query={}, safety_status="error"),  # keep UI happy
+            response="The data store is currently unavailable or the query failed to execute. Please try again later.",
+            session_id=request.session_id,
+            query_metadata=QueryMetadata(
+                es_query={},
+                safety_status="blocked", # Changed from "error" to fit the allowed Literals
+                blocked_reason="Elasticsearch execution failed"
+            )
         )
 
     # 4) Shape results

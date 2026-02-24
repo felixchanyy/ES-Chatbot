@@ -13,14 +13,10 @@ This summariser will try Chat Completions first, then fall back to Text Completi
 """
 
 from __future__ import annotations
-
 import json
 from typing import Any, Dict, Optional
-
 from openai import OpenAI
-
 from config import settings
-
 
 class LLMError(RuntimeError):
     pass
@@ -36,7 +32,8 @@ class ResponseSummariser:
         api_key: Optional[str] = None,
         model_name: Optional[str] = None,
         temperature: float = 0.2,
-        max_output_tokens: int = 350,
+        # INCREASE THIS: 350 is too low for reasoning models + tables
+        max_output_tokens: int = 1024, 
     ) -> None:
         self.client = OpenAI(
             base_url=base_url or settings.llm_base_url,
@@ -66,9 +63,10 @@ class ResponseSummariser:
         system = (
             "You are an OSINT analyst assistant. "
             "Summarise the provided results for the user's question. "
-            "Be concise and factual. "
+            "Be factual and thorough—ensure you include all relevant entities or "
+            "data points found in the results, especially if the user asked for a specific number (e.g., Top 10). "
             "Do not mention Elasticsearch, JSON, or internal implementation details. "
-            "If results are empty, say so and suggest how to broaden the query (e.g., wider time range)."
+            "If results are empty, say so."
         )
 
         payload = {

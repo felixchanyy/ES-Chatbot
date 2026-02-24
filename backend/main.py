@@ -1,10 +1,13 @@
-from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from elasticsearch import Elasticsearch
+from elasticsearch import Elasticsearch, logger
 import requests
-
+import logging 
+from fastapi import FastAPI, Request 
+from fastapi.responses import JSONResponse
 from config import settings
 from routers import chat, index
+
+logger = logging.getLogger("uvicorn.error") # This connects to the FastAPI/Uvicorn terminal output
 
 app = FastAPI(
     title="GKG OSINT Chatbot API",
@@ -80,3 +83,14 @@ def health_check():
         "llm": llm_ok,
         "chromadb": chroma_ok,
     }
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    # Log the real error for the developer to see in the terminal
+    logger.error(f"Global crash caught: {exc}")
+    
+    # Return a generic, safe message to the user
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "An internal server error occurred. Please try again later."}
+    )
