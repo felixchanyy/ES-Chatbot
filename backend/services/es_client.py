@@ -15,14 +15,14 @@ class ESClient:
             verify_certs=settings.es_verify_ssl
         )
 
-    async def search(self, query: dict) -> dict:
-        """
-        Execute a search query against Elasticsearch.
-        """
-        response = await self.client.search(
-            index=settings.es_index,
-            body=query
-        )
+    async def search(self, index: str, query: dict):
+        response = await self.client.search(index=index, body=query)
+
+        # Elasticsearch 8.x returns a Response object
+        # Ensure we always return a plain dict
+        if hasattr(response, "body"):
+            return response.body
+
         return response
 
     async def get_index_stats(self) -> dict:
