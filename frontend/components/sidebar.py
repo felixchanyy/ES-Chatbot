@@ -4,8 +4,9 @@ import streamlit as st
 import requests
 
 def render_sidebar(backend_url: str):
-    """Render the sidebar with index stats and settings."""
     st.header("Index Stats")
+    if st.button("Refresh Stats"):
+        st.rerun()
     
     # Fetch index stats from the backend
     stats_url = f"{backend_url}/api/v1/index/stats"

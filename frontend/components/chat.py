@@ -28,8 +28,8 @@ def render_chat_input(backend_url: str):
             chat_url = f"{backend_url}/api/v1/chat"
             payload = {
                 "message": prompt,
-                "session_id": "default-session",
-                "history": st.session_state.messages[:-1]  # Exclude the current user message
+                "session_id": st.session_state.session_id, # Use the dynamic ID
+                "history": st.session_state.messages[:-1]
             }
             
             try:

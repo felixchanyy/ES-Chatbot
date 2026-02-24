@@ -22,7 +22,7 @@ summariser = ResponseSummariser()
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """
-    Milestone 4:
+    Milestone 5: API Integration & Frontend.
     Full pipeline:
       NL question -> ES query -> safety -> execution -> result shaping -> LLM summary
     """

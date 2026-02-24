@@ -1,5 +1,5 @@
 from fastapi.middleware.cors import CORSMiddleware
-from elasticsearch import Elasticsearch, logger
+from elasticsearch import Elasticsearch
 import requests
 import logging 
 from fastapi import FastAPI, Request 
