@@ -1,0 +1,11 @@
+import uvicorn
+
+from main import app  # this ensures setup_logging() runs first
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_config=None,
+    )

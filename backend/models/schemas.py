@@ -16,7 +16,7 @@ class QueryMetadata(BaseModel):
     es_query: Optional[Dict] = Field(None, description="The ES query that was executed")
     total_hits: Optional[int] = None
     execution_time_ms: Optional[int] = None
-    safety_status: Literal["allowed", "blocked", "modified"]
+    safety_status: Literal["allowed", "blocked", "modified", "failed", "error"]
     blocked_reason: Optional[str] = None
 
 class ChatResponse(BaseModel):

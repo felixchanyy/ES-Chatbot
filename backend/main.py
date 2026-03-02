@@ -1,13 +1,16 @@
+import logging
+
 from fastapi.middleware.cors import CORSMiddleware
 from elasticsearch import Elasticsearch
 import requests
-import logging 
-from fastapi import FastAPI, Request 
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from config import settings
 from routers import chat, index
+from services.logging_config import setup_logging
 
-logger = logging.getLogger("uvicorn.error") # This connects to the FastAPI/Uvicorn terminal output
+setup_logging()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="GKG OSINT Chatbot API",
@@ -76,7 +79,6 @@ def health_check():
     chroma_ok = _check_chromadb()
 
     overall_ok = es_ok and llm_ok and chroma_ok
-
     return {
         "status": "ok" if overall_ok else "degraded",
         "elasticsearch": es_ok,
@@ -84,13 +86,25 @@ def health_check():
         "chromadb": chroma_ok,
     }
 
+# -------------------------
+# Error Handling
+# -------------------------
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    # Log the real error for the developer to see in the terminal
-    logger.error(f"Global crash caught: {exc}")
-    
-    # Return a generic, safe message to the user
+    # This will catch any unhandled exceptions in the application and log them with structured logging
+    # This should be the last resort for error handling, as specific exceptions should ideally be caught and handled in their respective routes or services for better granularity and user feedback.
+    session_id = getattr(request.state, "session_id", None)
+    logger.exception(
+        "Unhandled exception: %s",
+        extra={
+            "session_id": session_id,
+            "error_type": "undhandled_exception",
+            "error_detail": repr(exc),
+            "phase": "global_handling",
+        }
+    )
     return JSONResponse(
         status_code=500,
-        content={"detail": "An internal server error occurred. Please try again later."}
+        content={"detail": "An unexpected error occurred. Please try again later."},
     )
