@@ -14,6 +14,7 @@ class ChatRequest(BaseModel):
 
 class QueryMetadata(BaseModel):
     es_query: Optional[Dict] = Field(None, description="The ES query that was executed")
+    es_response: Optional[Dict] = Field(None, description="The raw response from ES")
     total_hits: Optional[int] = None
     execution_time_ms: Optional[int] = None
     safety_status: Literal["allowed", "blocked", "modified", "failed", "error"]

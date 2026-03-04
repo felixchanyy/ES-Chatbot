@@ -96,7 +96,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     # This should be the last resort for error handling, as specific exceptions should ideally be caught and handled in their respective routes or services for better granularity and user feedback.
     session_id = getattr(request.state, "session_id", None)
     logger.exception(
-        "Unhandled exception: %s",
+        f"Unhandled exception: {exc}",
         extra={
             "session_id": session_id,
             "error_type": "undhandled_exception",

@@ -127,6 +127,7 @@ async def chat(request: ChatRequest):
         response=answer,
         query_metadata=QueryMetadata(
             es_query=safe_query,
+            es_response=es_resp,
             total_hits=total_hits,
             execution_time_ms=took_ms,
             safety_status=validation.status.value,
