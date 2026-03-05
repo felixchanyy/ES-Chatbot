@@ -8,12 +8,14 @@ from services.query_safety import QuerySafetyLayer, SafetyStatus
 from services.es_client import ESClient
 from services.context_manager import ContextManager
 from services.response_summariser import ResponseSummariser
+from services.vector_store import store_docs
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+es = ESClient()
+store_docs(es)  # Store ES mapping in vector store on startup for semantic retrieval in query generation
 query_gen = QueryGenerator()
 query_safety = QuerySafetyLayer()
-es = ESClient()
 context_mgr = ContextManager(max_docs=query_safety.max_result_docs)
 summariser = ResponseSummariser()
 
@@ -36,7 +38,7 @@ async def chat(request: ChatRequest):
 
     # 1) Generate query
     try:
-        es_query = query_gen.generate(request.message, request.history)
+        es_query = await query_gen.generate(request.message, request.history)
     except QueryGenerationError as e:
         logger.warning(
             "Query generation failed",
@@ -127,6 +129,7 @@ async def chat(request: ChatRequest):
         response=answer,
         query_metadata=QueryMetadata(
             es_query=safe_query,
+            es_response=es_resp,
             total_hits=total_hits,
             execution_time_ms=took_ms,
             safety_status=validation.status.value,
