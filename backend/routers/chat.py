@@ -11,9 +11,9 @@ from services.response_summariser import ResponseSummariser
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+es = ESClient()
 query_gen = QueryGenerator()
 query_safety = QuerySafetyLayer()
-es = ESClient()
 context_mgr = ContextManager(max_docs=query_safety.max_result_docs)
 summariser = ResponseSummariser()
 
@@ -36,7 +36,7 @@ async def chat(request: ChatRequest):
 
     # 1) Generate query
     try:
-        es_query = query_gen.generate(request.message, request.history)
+        es_query = await query_gen.generate(request.message, request.history)
     except QueryGenerationError as e:
         logger.warning(
             "Query generation failed",
