@@ -1,76 +1,80 @@
 # backend/services/es_client.py
 
+from __future__ import annotations
+
+from typing import Any, Dict
+
 from elasticsearch import AsyncElasticsearch
+
 from config import settings
 
+
 class ESClient:
-    """
-    Elasticsearch client wrapper.
+    """Thin wrapper around AsyncElasticsearch.
+
+    The helper methods normalise Elasticsearch 8.x Response objects into plain dicts
+    so the rest of the code can safely call .get(...) without version-specific issues.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.client = AsyncElasticsearch(
             hosts=[settings.es_host],
             basic_auth=(settings.es_username, settings.es_password),
-            verify_certs=settings.es_verify_ssl
+            verify_certs=settings.es_verify_ssl,
         )
 
-    async def search(self, index: str, query: dict):
+    @staticmethod
+    def _to_dict(response: Any) -> Dict[str, Any]:
+        return response.body if hasattr(response, "body") else response
+
+    async def search(self, index: str, query: dict) -> Dict[str, Any]:
         response = await self.client.search(index=index, body=query)
+        return self._to_dict(response)
 
-        # Elasticsearch 8.x returns a Response object
-        # Ensure we always return a plain dict
-        if hasattr(response, "body"):
-            return response.body
-
-        return response
+    async def get_index_mapping(self, index: str | None = None) -> Dict[str, Any]:
+        """Return the raw mapping document for the configured index."""
+        response = await self.client.indices.get_mapping(index=index or settings.es_index)
+        return self._to_dict(response)
 
     async def get_index_stats(self) -> dict:
-        """
-        Return summary statistics about the index:
-        - total_documents
-        - index_size_bytes
-        - earliest_date
-        - latest_date
-        - top_sources
-        """
+        """Return summary statistics about the configured index."""
 
-        # 1️⃣ Document count
-        count_resp = await self.client.count(index=settings.es_index)
+        count_resp = self._to_dict(await self.client.count(index=settings.es_index))
         total_docs = count_resp.get("count", 0)
 
-        # 2️⃣ Index size
-        stats_resp = await self.client.indices.stats(
-            index=settings.es_index,
-            metric="store",
+        stats_resp = self._to_dict(
+            await self.client.indices.stats(
+                index=settings.es_index,
+                metric="store",
+            )
         )
 
-        index_data = stats_resp["indices"].get(settings.es_index, {})
+        index_data = stats_resp.get("indices", {}).get(settings.es_index, {})
         size_bytes = (
             index_data.get("total", {})
             .get("store", {})
             .get("size_in_bytes", 0)
         )
 
-        # 3️⃣ Aggregations for earliest/latest + top sources
-        agg_resp = await self.client.search(
-            index=settings.es_index,
-            size=0,
-            track_total_hits=False,
-            aggs={
-                "earliest_date": {"min": {"field": "V21Date"}},
-                "latest_date": {"max": {"field": "V21Date"}},
-                "top_sources": {
-                    "terms": {
-                        "field": "V2SrcCmnName.V2SrcCmnName.keyword",
-                        "size": 10,
-                    }
+        agg_resp = self._to_dict(
+            await self.client.search(
+                index=settings.es_index,
+                size=0,
+                track_total_hits=False,
+                aggs={
+                    "earliest_date": {"min": {"field": "V21Date"}},
+                    "latest_date": {"max": {"field": "V21Date"}},
+                    "top_sources": {
+                        "terms": {
+                            "field": "V2SrcCmnName.V2SrcCmnName.keyword",
+                            "size": 10,
+                        }
+                    },
                 },
-            },
+            )
         )
 
         aggs = agg_resp.get("aggregations", {})
-
         earliest = aggs.get("earliest_date", {}).get("value_as_string")
         latest = aggs.get("latest_date", {}).get("value_as_string")
 
