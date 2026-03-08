@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 from langchain_openai import ChatOpenAI
 
 from config import settings
-from services.schema_store import schema_store
+from services.schema_store import get_schema_store
 
 
 class QueryGenerationError(Exception):
@@ -114,11 +114,19 @@ Relevant live schema context retrieved from Chroma:
         """Generate an Elasticsearch query body using live schema retrieval."""
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        schema_docs = await schema_store.search_schema(question, k=8)
-        if not schema_docs:
-            schema_docs = await schema_store.get_schema_overview(limit=12)
-        schema_context = "\n".join(schema_docs) if schema_docs else "(no schema context available)"
-
+        schema_context = "(no schema context available)"
+        try:
+            schema_store = get_schema_store()
+            schema_docs = await schema_store.search_schema(question, k=8)
+            if not schema_docs:
+                schema_docs = await schema_store.get_schema_overview(limit=12)
+            if schema_docs:
+                schema_context = "\n".join(schema_docs)
+        except Exception:
+            # Safe fallback: query generation can still proceed using the current question,
+            # history, and previous attempt observations.
+            schema_context = "(schema retrieval unavailable)"
+        
         messages = [
             {
                 "role": "system",

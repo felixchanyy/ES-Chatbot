@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -19,29 +19,59 @@ logger = logging.getLogger(__name__)
 class SchemaStore:
     """Synchronise Elasticsearch mappings into a Chroma server collection.
 
-    Design:
-    - Fetch the ES mapping at runtime.
-    - Convert mapping fields into small descriptive text chunks.
-    - Embed those chunks in the application.
-    - Upsert the embeddings/documents into the remote Chroma server.
-    - Query the Chroma collection to retrieve the most relevant schema context for NL->ES generation.
+    Important change:
+    - Do NOT create the collection in module global scope.
+    - Do NOT fail app import if Chroma is temporarily unavailable.
     """
 
     def __init__(self) -> None:
         self.es = ESClient()
         self.embeddings = HuggingFaceEmbeddings(model_name=settings.schema_embedding_model)
-        self.client = chromadb.HttpClient(
-            host=settings.chroma_host,
-            port=settings.chroma_port,
-            ssl=settings.chroma_ssl,
-        )
-        self.collection = self.client.get_or_create_collection(
-            name=settings.chroma_collection,
-            metadata={"source": "elasticsearch_schema", "index": settings.es_index},
-        )
+        self.client: Optional[chromadb.HttpClient] = None
+        self.collection = None
+
+    def _ensure_client_and_collection(self) -> None:
+        """Lazy-init the Chroma HTTP client and collection.
+
+        Important:
+        - Do not crash module import.
+        - Surface a clean runtime error if the Chroma server is up but API-incompatible.
+        """
+        if self.client is None:
+            try:
+                self.client = chromadb.HttpClient(
+                    host=settings.chroma_host,
+                    port=settings.chroma_port,
+                    ssl=settings.chroma_ssl,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Unable to initialise Chroma HttpClient. "
+                    "This usually means the Chroma server version is incompatible with the installed Python client."
+                ) from exc
+
+        if self.collection is None:
+            try:
+                self.collection = self.client.get_or_create_collection(
+                    name=settings.chroma_collection,
+                    metadata={"source": "elasticsearch_schema", "index": settings.es_index},
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Unable to access the Chroma collection. "
+                    "The server may be running an older API version without required v2 routes."
+                ) from exc
+
+            if self.collection is None:
+                self.collection = self.client.get_or_create_collection(
+                    name=settings.chroma_collection,
+                    metadata={"source": "elasticsearch_schema", "index": settings.es_index},
+                )
 
     async def ensure_schema_collection_synced(self, force: bool = False) -> None:
         """Populate the Chroma collection from the current ES mapping if needed."""
+        await asyncio.to_thread(self._ensure_client_and_collection)
+
         try:
             count = await asyncio.to_thread(self.collection.count)
         except Exception:
@@ -77,9 +107,7 @@ class SchemaStore:
 
         logger.info(
             "schema_synced_to_chroma",
-            extra={
-                "result_count": len(documents),
-            },
+            extra={"result_count": len(documents)},
         )
 
     async def search_schema(self, question: str, k: int = 8) -> List[str]:
@@ -149,7 +177,7 @@ class SchemaStore:
                         )
                 elif field_type in {"integer", "long", "float", "double", "scaled_float", "short", "byte"}:
                     usage_notes.append("Use this field for numeric ranges, sorting, or statistical aggregations")
-                elif field_type in {"boolean"}:
+                elif field_type == "boolean":
                     usage_notes.append("Use this field as a boolean filter")
                 elif field_type in {"nested", "object"}:
                     usage_notes.append("This is a container field that may have child properties")
@@ -160,7 +188,9 @@ class SchemaStore:
                     f"Type: {field_type}",
                 ]
                 if subfield_names:
-                    text_parts.append(f"Subfields: {', '.join(f'{full_name}.{name}' for name in subfield_names)}")
+                    text_parts.append(
+                        f"Subfields: {', '.join(f'{full_name}.{name}' for name in subfield_names)}"
+                    )
                 if usage_notes:
                     text_parts.append(f"Usage: {'; '.join(usage_notes)}")
 
@@ -210,4 +240,12 @@ class SchemaStore:
         return hashlib.sha1(value.encode("utf-8")).hexdigest()
 
 
-schema_store = SchemaStore()
+# Lazy singleton accessor instead of eager module-level construction
+_schema_store_singleton: Optional[SchemaStore] = None
+
+
+def get_schema_store() -> SchemaStore:
+    global _schema_store_singleton
+    if _schema_store_singleton is None:
+        _schema_store_singleton = SchemaStore()
+    return _schema_store_singleton

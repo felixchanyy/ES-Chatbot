@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from routers import chat, index
 from services.logging_config import setup_logging
-from services.schema_store import schema_store
+from services.schema_store import get_schema_store
 
 setup_logging()
 logger = logging.getLogger(__name__)
@@ -33,20 +33,12 @@ app.include_router(index.router, prefix="/api/v1")
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    """Warm up the Chroma schema collection from the live ES mapping.
-
-    The application does not crash if this fails; query generation will still try
-    to lazily sync the schema later.
-    """
     try:
+        schema_store = get_schema_store()
         await schema_store.ensure_schema_collection_synced(force=False)
     except Exception:
         logger.exception("startup_schema_sync_failed")
 
-
-# -------------------------
-# Health Check Helpers
-# -------------------------
 
 def _check_elasticsearch() -> bool:
     try:
@@ -70,11 +62,21 @@ def _check_llm() -> bool:
 
 
 def _check_chromadb() -> bool:
+    """Check Chroma health.
+
+    Try v2 first because the Python HttpClient expects v2-capable servers.
+    Fall back to v1 for compatibility during debugging / transitional states.
+    """
+    base = f"http://{settings.chroma_host}:{settings.chroma_port}"
     try:
-        r = requests.get(
-            f"http://{settings.chroma_host}:{settings.chroma_port}/api/v2/heartbeat",
-            timeout=5,
-        )
+        r = requests.get(f"{base}/api/v2/heartbeat", timeout=5)
+        if r.status_code == 200:
+            return True
+    except Exception:
+        pass
+
+    try:
+        r = requests.get(f"{base}/api/v1/heartbeat", timeout=5)
         return r.status_code == 200
     except Exception:
         return False
