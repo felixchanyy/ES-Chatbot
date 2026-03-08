@@ -1,16 +1,16 @@
 """
 Milestone 2 acceptance tests for the newer async, schema-aware QueryGenerator.
 
-What changed compared to the older test:
-- The newer QueryGenerator uses async generation via `agenerate(...)`
-- Schema/context is no longer retrieved by directly monkeypatching `vectorstore`
-- We patch `_get_schema_context_async(...)` instead, which is the cleaner contract
-- The LLM is still monkeypatched so the test remains deterministic
+This version does NOT assume QueryGenerator has a private helper like
+`_get_schema_context_async`. Instead, it patches the dependency actually used
+by the module: `get_schema_store()` inside services.query_generator.
 
-These tests still validate the same milestone intent:
+These tests validate:
 1. Natural language -> valid Elasticsearch query dict
 2. Correct use of V2Persons.V1Person.keyword for top-people aggregation
-3. Invalid LLM JSON raises QueryGenerationError cleanly
+3. Invalid LLM JSON raises QueryGenerationError
+4. Retrieved schema context is included in the LLM system prompt
+5. Empty schema context does not crash query generation
 """
 
 from __future__ import annotations
@@ -22,15 +22,29 @@ import pytest
 
 
 class _FakeLLM:
-    """Simple fake LLM that returns a fixed `.content` payload."""
+    """Fake LLM returning a fixed `.content` string."""
 
     def __init__(self, content: str):
         self._content = content
+        self.last_messages = None
 
     def invoke(self, messages):
-        # Keep messages accessible for optional debugging/assertion
         self.last_messages = messages
         return SimpleNamespace(content=self._content)
+
+
+class _FakeSchemaStore:
+    """Fake schema store matching the newer async schema retrieval contract."""
+
+    def __init__(self, schema_docs=None, overview_docs=None):
+        self.schema_docs = schema_docs or []
+        self.overview_docs = overview_docs or []
+
+    async def search_schema(self, question: str, k: int = 8):
+        return self.schema_docs
+
+    async def get_schema_overview(self, limit: int = 12):
+        return self.overview_docs
 
 
 @pytest.mark.asyncio
@@ -75,21 +89,19 @@ async def test_m2_query_generation_returns_valid_es_query_dict_for_top10_people_
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", _FakeLLM(llm_json), raising=True)
 
-    async def _fake_get_schema_context_async(question: str, k: int = 8) -> str:
-        return (
-            "Field: V21Date. Type: date. Usage: Use for date filtering.\n"
-            "Field: V2Persons.V1Person.keyword. Type: keyword. "
-            "Usage: Use for exact matches and terms aggregations."
-        )
-
-    monkeypatch.setattr(
-        qg,
-        "_get_schema_context_async",
-        _fake_get_schema_context_async,
-        raising=True,
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[
+            "Field: V21Date. Type: date. Usage: Use for date filtering.",
+            "Field: V2Persons.V1Person.keyword. Type: keyword. Usage: Use for exact matches and terms aggregations.",
+        ]
     )
 
-    result = await qg.agenerate("Who are the top 10 people mentioned this week?")
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
+
+    result = await qg.generate("Who are the top 10 people mentioned this week?")
 
     assert isinstance(result, dict)
     assert "aggs" in result
@@ -109,28 +121,26 @@ async def test_m2_invalid_llm_output_raises_query_generation_error(monkeypatch):
     """
     Acceptance criteria:
     - If the LLM returns invalid JSON, QueryGenerator raises QueryGenerationError
-    - The error should be clean and intentional, not a crash from later stages
     """
-    from services.query_generator import QueryGenerator, QueryGenerationError
+    from services.query_generator import QueryGenerationError, QueryGenerator
 
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", _FakeLLM("```json\n{not valid}\n```"), raising=True)
 
-    async def _fake_get_schema_context_async(question: str, k: int = 8) -> str:
-        return (
-            "Field: V21Date. Type: date.\n"
-            "Field: V2Persons.V1Person.keyword. Type: keyword."
-        )
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[
+            "Field: V21Date. Type: date.",
+            "Field: V2Persons.V1Person.keyword. Type: keyword.",
+        ]
+    )
 
     monkeypatch.setattr(
-        qg,
-        "_get_schema_context_async",
-        _fake_get_schema_context_async,
-        raising=True,
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
     )
 
     with pytest.raises(QueryGenerationError) as exc_info:
-        await qg.agenerate("Who are the top 10 people mentioned this week?")
+        await qg.generate("Who are the top 10 people mentioned this week?")
 
     assert "Invalid JSON" in str(exc_info.value) or "valid JSON" in str(exc_info.value)
 
@@ -138,11 +148,8 @@ async def test_m2_invalid_llm_output_raises_query_generation_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_m2_schema_context_is_included_in_prompt(monkeypatch):
     """
-    Extra regression test for the newer schema-aware design.
-
-    This verifies that retrieved schema context is actually passed into the LLM prompt.
-    It is useful because the new architecture depends on schema retrieval, not hardcoded
-    Appendix A mappings alone.
+    Regression test for the schema-aware design:
+    verifies that retrieved schema context is inserted into the LLM system prompt.
     """
     from services.query_generator import QueryGenerator
 
@@ -178,22 +185,17 @@ async def test_m2_schema_context_is_included_in_prompt(monkeypatch):
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", fake_llm, raising=True)
 
-    schema_context = (
-        "Field: V2Persons.V1Person.keyword. Type: keyword. "
-        "Usage: Use for exact matches and terms aggregations."
-    )
-
-    async def _fake_get_schema_context_async(question: str, k: int = 8) -> str:
-        return schema_context
+    schema_context_docs = [
+        "Field: V2Persons.V1Person.keyword. Type: keyword. Usage: Use for exact matches and terms aggregations."
+    ]
+    fake_schema_store = _FakeSchemaStore(schema_docs=schema_context_docs)
 
     monkeypatch.setattr(
-        qg,
-        "_get_schema_context_async",
-        _fake_get_schema_context_async,
-        raising=True,
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
     )
 
-    await qg.agenerate("Who are the top 10 people mentioned this week?")
+    await qg.generate("Who are the top 10 people mentioned this week?")
 
     sent_messages = fake_llm.last_messages
     assert isinstance(sent_messages, list)
@@ -201,16 +203,14 @@ async def test_m2_schema_context_is_included_in_prompt(monkeypatch):
 
     system_message = sent_messages[0]
     assert system_message["role"] == "system"
-    assert schema_context in system_message["content"]
+    assert schema_context_docs[0] in system_message["content"]
 
 
 @pytest.mark.asyncio
 async def test_m2_generate_can_use_empty_schema_context_without_crashing(monkeypatch):
     """
-    Extra resilience test for the newer design.
-
-    Even if schema retrieval fails or returns nothing, query generation should still
-    parse valid LLM JSON instead of crashing inside the schema retrieval path.
+    If schema search returns nothing, QueryGenerator should fall back to overview
+    or continue without crashing.
     """
     from services.query_generator import QueryGenerator
 
@@ -245,16 +245,16 @@ async def test_m2_generate_can_use_empty_schema_context_without_crashing(monkeyp
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", _FakeLLM(llm_json), raising=True)
 
-    async def _fake_get_schema_context_async(question: str, k: int = 8) -> str:
-        return "(no schema context available)"
-
-    monkeypatch.setattr(
-        qg,
-        "_get_schema_context_async",
-        _fake_get_schema_context_async,
-        raising=True,
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[],
+        overview_docs=["(no schema context available)"],
     )
 
-    result = await qg.agenerate("Who are the top 10 people mentioned this week?")
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
+
+    result = await qg.generate("Who are the top 10 people mentioned this week?")
     assert isinstance(result, dict)
     assert result["aggs"]["top_people"]["terms"]["field"] == "V2Persons.V1Person.keyword"
