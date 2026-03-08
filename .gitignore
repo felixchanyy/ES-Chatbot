@@ -2,6 +2,7 @@
 
 # Environment variables
 .env
+.venv
 
 # Python
 __pycache__/
