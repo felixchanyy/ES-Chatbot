@@ -1,21 +1,53 @@
 import logging
 
+from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from elasticsearch import Elasticsearch
 import requests
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from services.context_manager import ContextManager
+from services.query_generator import QueryGenerator
+from services.query_safety import QuerySafetyLayer
+from services.response_summariser import ResponseSummariser
 from config import settings
 from routers import chat, index
 from services.logging_config import setup_logging
+from services.es_client import ESClient
+from services.chroma_client import ChromaClient
 
 setup_logging()
 logger = logging.getLogger(__name__)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- STARTUP LOGIC ---
+    es = ESClient()
+    chroma_client = ChromaClient()
+    await chroma_client.initialize_data(es_client=es)
+    
+    query_gen = QueryGenerator(chroma_client=chroma_client)
+    query_safety = QuerySafetyLayer()
+    context_mgr = ContextManager(max_docs=query_safety.max_result_docs)
+    summariser = ResponseSummariser()
+
+    yield {
+        "es_client": es,
+        "chroma_client": chroma_client,
+        "query_gen": query_gen,
+        "query_safety": query_safety,
+        "context_mgr": context_mgr,
+        "summariser": summariser
+    }
+    
+    # --- SHUTDOWN LOGIC ---
+    await es.client.close()
 
 app = FastAPI(
     title="GKG OSINT Chatbot API",
     version="1.0.0",
     description="Natural language query interface for the GDELT GKG Elasticsearch index",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -96,7 +128,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     # This should be the last resort for error handling, as specific exceptions should ideally be caught and handled in their respective routes or services for better granularity and user feedback.
     session_id = getattr(request.state, "session_id", None)
     logger.exception(
-        "Unhandled exception: %s",
+        f"Unhandled exception: {exc}",
         extra={
             "session_id": session_id,
             "error_type": "undhandled_exception",

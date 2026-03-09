@@ -25,4 +25,5 @@ def render_sidebar(backend_url: str):
     
     st.header("Settings")
     st.checkbox("Show raw query", key="show_raw_query")
+    st.checkbox("Show raw response", key="show_raw_response")
     st.button("Clear Chat", on_click=lambda: st.session_state.update(messages=[]))

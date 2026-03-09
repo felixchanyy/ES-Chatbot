@@ -1,6 +1,7 @@
 # backend/services/es_client.py
 
 from elasticsearch import AsyncElasticsearch
+from langchain_core.documents import Document
 from config import settings
 
 class ESClient:
@@ -87,3 +88,21 @@ class ESClient:
             "latest_date": latest,
             "top_sources": top_sources,
         }
+    
+    async def get_mapping(self) -> list[Document]:
+        mapping = await self.client.indices.get_mapping(index=settings.es_index)
+        actual_index_name = list(mapping.keys())[0]
+        properties = mapping[actual_index_name]["mappings"]["properties"]
+
+        docs = []
+        for field, info in properties.items():
+            field_type = info.get("type", "object")
+
+            text = f"""
+            Field: {field}
+            Type: {field_type}
+            Description:  {info}
+            """
+            docs.append(Document(page_content=text))
+
+        return docs

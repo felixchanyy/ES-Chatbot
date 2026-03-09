@@ -2,66 +2,58 @@
 
 import json
 import re
-from datetime import datetime  # 1. Add this import
+from datetime import datetime
+
+from services.chroma_client import ChromaClient
+from services.langchain_tools import lookup_region
 from typing import Any, Dict, List, Optional
+from langchain.agents import create_agent
+from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 from config import settings
 
 class QueryGenerationError(Exception):
     pass
 
 class QueryGenerator:
-    def __init__(self) -> None:
+    def __init__(self, chroma_client: ChromaClient) -> None:
+        # LLM setup
         self.llm = ChatOpenAI(
             openai_api_base=settings.llm_base_url,
             openai_api_key=settings.llm_api_key,
             model_name=settings.llm_model_name,
             temperature=0,
         )
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.vectorstore = Chroma(
-            collection_name="gkg_mapping",
-            embedding_function=self.embeddings,
-            persist_directory="./chroma_db",
+        self.chroma_client = chroma_client
+        # Tools setup
+        self.tools = [lookup_region]
+        
+
+        # Prompt setup
+        self.prompt ="""
+You are an OSINT assistant that converts user questions into valid Elasticsearch JSON queries for gdelt data.
+    - Use the provided schema context to understand field names and types.
+    - Only use the provided tool for region name to code lookups. Do not attempt to hardcode any region codes.
+
+### RULES:
+1. Always use 'V21Date' for date filtering.
+2. For "Top 10" use terms aggregation with '.keyword'.
+3. Set "size": 0 for aggregations.
+4. Target index is always 'gkg'.
+5. Return ONLY valid JSON. No explanations.
+"""
+
+        # Agent setup
+        self.agent = create_agent(
+            model=self.llm,
+            tools=self.tools,
+            system_prompt=self.prompt
         )
-
-    # 2. Update to accept current_time
-    def _build_system_prompt(self, schema_context: str, current_time: str) -> str:
-        return f"""
-    You are an OSINT Assistant. Convert the user's question into a valid Elasticsearch JSON query.
-
-    ### CONTEXT:
-    Current Date and Time: {current_time}
-
-    ### APPENDIX A FIELD REFERENCE:
-    - Time: 'V21Date'
-    - Persons: 'V2Persons.V1Person' (.keyword for aggregations)
-    - Organisations: 'V2Orgs.V1Org' (.keyword for aggregations)
-    - Locations: 'V2Locations.FullName' (.keyword for aggregations)
-    - Country Code: 'V2Locations.CountryCode.keyword'
-    - Themes: 'V2EnhancedThemes.V2Theme' (.keyword for aggregations)
-    - Tone: 'V15Tone.Tone'
-    - Sources: 'V2SrcCmnName.V2SrcCmnName'
-    - Title: 'V2ExtrasXML.Title'
-    - URL: 'V2DocId'
-    - Quotes: 'V21Quotations.Quote'
-
-    ### RULES:
-    1. Always use 'V21Date' for date filtering.
-    2. For "Top 10" use terms aggregation with '.keyword'.
-    3. Set "size": 0 for aggregations.
-    4. Target index is always 'gkg'.
-    5. Return ONLY valid JSON. No explanations.
-
-    ### SCHEMA CONTEXT:
-    {schema_context}
-    """.strip()
 
     def _parse_json(self, text: str) -> Dict[str, Any]:
         if not text:
             raise QueryGenerationError("Empty LLM output.")
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
         cleaned = text.strip().replace("```json", "").replace("```", "").strip()
         try:
             return json.loads(cleaned)
@@ -75,16 +67,39 @@ class QueryGenerator:
             raise QueryGenerationError("LLM did not return valid JSON.")
 
     def generate(self, question: str, history: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        # 3. Calculate current time
-        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        docs = self.chroma_client.similarity_search(question, k=6)
+        schema_context = "\n".join(d.page_content for d in docs)
+        messages = []
+        if history:
+            for item in history:
+                if isinstance(item, dict):
+                    role = item.get("role") or "user"
+                    content = item.get("content") or ""
+                else:
+                    # It's a Pydantic object (HistoryItem)
+                    role = getattr(item, "role", "user") or "user"
+                    content = getattr(item, "content", "") or ""
+                messages.append({"role": role, "content": content})
+
+        enriched_question = f"""
+            Current datetime: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+
+            Schema context:
+            {schema_context}
+
+            User question:
+            {question}
+            """
+        messages.append({"role": "user", "content": enriched_question})
+        response = self.agent.invoke({
+            "messages": messages
+        }
+        )
+            
+        print(response)
+        final_message_content = response["messages"][-1].content
         
-        docs = self.vectorstore.similarity_search(question, k=6)
-        schema_context = "\n".join([d.page_content for d in docs]) if docs else ""
-
-        messages = [
-            {"role": "system", "content": self._build_system_prompt(schema_context, now)},
-            {"role": "user", "content": question},
-        ]
-
-        response = self.llm.invoke(messages)
-        return self._parse_json(response.content)
+        if not final_message_content:
+            raise QueryGenerationError("No query generated by agent.")
+        
+        return self._parse_json(final_message_content)

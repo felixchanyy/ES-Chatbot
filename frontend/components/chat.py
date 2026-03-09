@@ -42,6 +42,10 @@ def render_chat_input(backend_url: str):
                     if st.session_state.get("show_raw_query", False):
                         with st.expander("Raw Query"):
                             st.json(result.get("query_metadata", {}).get("es_query", {}))
+                    # Display raw response if enabled
+                    if st.session_state.get("show_raw_response", False):
+                        with st.expander("Raw Response"):
+                            st.json(result.get("query_metadata", {}).get("es_response", {}))
                 else:
                     full_response = f"Error: {response.status_code} - {response.text}"
             except Exception as e:

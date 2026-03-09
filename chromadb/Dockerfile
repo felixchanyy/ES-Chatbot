@@ -1,4 +1,4 @@
-FROM chromadb/chroma:latest
+FROM chromadb/chroma
 
 USER root
 

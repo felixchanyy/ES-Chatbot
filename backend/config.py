@@ -21,7 +21,7 @@ class Settings(BaseSettings):
 
     # ChromaDB
     chroma_host: str = "chromadb"
-    chroma_port: int = 8020
+    chroma_port: int = 8000
 
     model_config = SettingsConfigDict(
         env_file=".env"
