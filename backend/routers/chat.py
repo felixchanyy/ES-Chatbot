@@ -13,7 +13,9 @@ from services.es_client import ESClient
 from services.query_generator import QueryGenerationError, QueryGenerator
 from services.query_safety import QuerySafetyLayer, SafetyStatus
 from services.response_summariser import ResponseSummariser
+from services.result_validator import ResultValidator
 
+validator = ResultValidator()
 router = APIRouter()
 logger = logging.getLogger(__name__)
 query_gen = QueryGenerator()
@@ -187,6 +189,34 @@ async def chat(request: ChatRequest):
         }
         attempts.append(attempt_record)
 
+        validation_outcome = None
+
+        if query_type == "aggregation":
+            validation_outcome = validator.validate_aggregation(request.message, shaped)
+
+            if validation_outcome.valid_items:
+                # optionally overwrite shaped results so downstream summary uses validated buckets
+                first_agg_name = next(iter(shaped["aggregations"].keys()))
+                shaped["aggregations"][first_agg_name] = validation_outcome.valid_items
+
+            attempt_record["validation_outcome"] = {
+                "is_sufficient": validation_outcome.is_sufficient,
+                "reason": validation_outcome.reason,
+                "invalid_items": validation_outcome.invalid_items,
+            }
+
+            if validation_outcome.is_sufficient:
+                final_attempt = attempt_record
+                break
+
+            observations.append(
+                f"Attempt {attempt_no}: result insufficient. "
+                f"Reason={validation_outcome.reason}. "
+                f"Rejected buckets={[x.get('key') for x in validation_outcome.invalid_items[:10]]}. "
+                f"Need more valid entities."
+            )
+            continue
+
         if _has_useful_results(shaped, query_type):
             final_attempt = attempt_record
             break
@@ -285,11 +315,23 @@ def _build_stage_observation(
     query: Dict[str, Any],
     shaped: Dict[str, Any],
     query_type: str,
+    validation_reason: str | None = None,
+    invalid_keys: list[str] | None = None,
 ) -> str:
     if not isinstance(shaped, dict):
         return f"Attempt {attempt_no}: result shaping failed."
 
     if query_type == "aggregation":
+        if validation_reason:
+            invalid_part = ""
+            if invalid_keys:
+                invalid_part = f" Invalid buckets: {', '.join(invalid_keys[:10])}."
+            return (
+                f"Attempt {attempt_no}: aggregation returned buckets but result is insufficient. "
+                f"{validation_reason}.{invalid_part} "
+                "Need a reformulated query to get enough valid entities."
+            )
+
         has_buckets = _has_non_empty_buckets(shaped.get("aggregations"))
         if has_buckets:
             return f"Attempt {attempt_no}: aggregation query returned non-empty buckets."
