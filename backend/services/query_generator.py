@@ -26,27 +26,28 @@ class QueryGenerator:
         )
         self.chroma_client = chroma_client
         # Tools setup
-        self.tools = [lookup_region]
+        #self.tools = [lookup_region]
         
 
         # Prompt setup
         self.prompt ="""
 You are an OSINT assistant that converts user questions into valid Elasticsearch JSON queries for gdelt data.
-    - Use the provided schema context to understand field names and types.
-    - Only use the provided tool for region name to code lookups. Do not attempt to hardcode any region codes.
 
-### RULES:
-1. Always use 'V21Date' for date filtering.
-2. For "Top 10" use terms aggregation with '.keyword'.
-3. Set "size": 0 for aggregations.
-4. Target index is always 'gkg'.
-5. Return ONLY valid JSON. No explanations.
+Rules:
+1. Return ONLY valid JSON object. No prose, no markdown, no code fences, no metadata.
+2. Use only fields that appear in the schema context, for all dates, use V21Date.
+3. Do not invent field names.
+4. For "top N", "most common", or ranking questions, use a terms aggregation and set top-level "size": 0.
+5. Prefer keyword fields or keyword subfields for exact filters, sorting, and terms aggregations.
+6. If no specific time range is provided, by default use a 1 year timeframe.
+7. Keep the query safe and read-only. Never use scripts.
+8. Use concise, production-sensible Elasticsearch queries.
+
 """
 
         # Agent setup
         self.agent = create_agent(
             model=self.llm,
-            tools=self.tools,
             system_prompt=self.prompt
         )
 
@@ -91,12 +92,12 @@ You are an OSINT assistant that converts user questions into valid Elasticsearch
             {question}
             """
         messages.append({"role": "user", "content": enriched_question})
+        print(enriched_question)
         response = self.agent.invoke({
             "messages": messages
         }
         )
             
-        print(response)
         final_message_content = response["messages"][-1].content
         
         if not final_message_content:

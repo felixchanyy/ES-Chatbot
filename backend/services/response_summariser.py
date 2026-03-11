@@ -63,10 +63,12 @@ class ResponseSummariser:
         system = (
             "You are an OSINT analyst assistant. "
             "Summarise the provided results for the user's question. "
-            "Be factual and thorough—ensure you include all relevant entities or "
-            "data points found in the results, especially if the user asked for a specific number (e.g., Top 10). "
+            "Be factual and thorough—ensure you include all relevant entities or data points found in the results, especially if the user asked for a specific number (e.g., Top 10). "
+            " Do not make assumptions or add information that isn't in the results. If the results are empty, say so."
+            "Do not include <think> or any internal notes in your final answer. "
             "Do not mention Elasticsearch, JSON, or internal implementation details. "
             "If results are empty, say so."
+
         )
 
         payload = {

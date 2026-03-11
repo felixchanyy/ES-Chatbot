@@ -1,3 +1,5 @@
+import asyncio
+
 from langchain_core.documents import Document
 from langchain_chroma import Chroma
 from chromadb import HttpClient
@@ -14,8 +16,8 @@ class ChromaClient:
     This is used to store and retrieve vector embeddings for gdelt metadata fields.
     """
     def __init__(self) -> None:
-        self.embeddings = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
-        self.collection_name = "gkg"
+        self.embeddings = HuggingFaceEmbeddings(model_name=settings.chroma_embedding_model)
+        self.collection_name = settings.chroma_collection_name
         client = HttpClient(
             host=settings.chroma_host,
             port=settings.chroma_port,
@@ -38,9 +40,34 @@ class ChromaClient:
         """
         Add a list of langchain.schema.Document to Chroma and persist.
         """
-        docs = await es_client.get_mapping()
-        self.vectorstore.add_documents(docs)
-        logger.info(f"Added {len(docs)} documents to collection '{self.collection_name}'.")
+        chunks = await es_client.get_chunks()
+        if not chunks:
+            logger.warning("No documents found to add to ChromaDB.")
+            return
+        
+        ids = [chunk["id"] for chunk in chunks]
+        documents = [chunk["document"] for chunk in chunks]
+        metadatas = [chunk["metadata"] for chunk in chunks]
+        embeddings = await asyncio.to_thread(self.embeddings.embed_documents, documents)
+
+        existing = await asyncio.to_thread(self.vectorstore._collection.get, include=[])
+        existing_ids = set(existing.get("ids", []))
+        stale_ids = list(existing_ids - set(ids))
+        if stale_ids:
+            await asyncio.to_thread(self.vectorstore._collection.delete, ids=stale_ids)
+
+        await asyncio.to_thread(
+            self.vectorstore._collection.upsert,
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+        logger.info(
+            "schema_synced_to_chroma",
+            extra={"result_count": len(documents)},
+        )
 
     def similarity_search(self, query: str, k: int = 6) -> list[Document]:
         """

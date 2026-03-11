@@ -22,6 +22,8 @@ class Settings(BaseSettings):
     # ChromaDB
     chroma_host: str = "chromadb"
     chroma_port: int = 8000
+    chroma_embedding_model: str = "all-MiniLM-L6-v2"
+    chroma_collection_name: str = "gkg"
 
     class Config:
         env_file = ".env"
