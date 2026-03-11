@@ -65,6 +65,13 @@ Instructions:
     output_messages = result["messages"]
     final_answer = output_messages[-1].content
 
+    for idx, msg in enumerate(output_messages):
+            # We only want to log the AI's responses, not the user's prompt or the tool's raw JSON return
+            if getattr(msg, "type", "") == "ai" and msg.content:
+                logger.info(f"--- AI THINKING STEP {idx} ---")
+                logger.info(msg.content)
+                logger.info("-----------------------------")
+
     last_query = {}
     safety_status = "allowed"
     blocked_reason = None
