@@ -1,84 +1,60 @@
 """
-Milestone 2 — Query Generation Pipeline
+Milestone 2 acceptance tests for the newer async, schema-aware QueryGenerator.
 
-What this file tests (unit-level, offline):
-- NL question -> valid Elasticsearch query dict (no execution)
-- Uses correct mapping fields (e.g., V2Persons.V1Person.keyword for terms agg)
-- Invalid LLM output is caught and raises QueryGenerationError
+This version does NOT assume QueryGenerator has a private helper like
+`_get_schema_context_async`. Instead, it patches the dependency actually used
+by the module: `get_schema_store()` inside services.query_generator.
+
+These tests validate:
+1. Natural language -> valid Elasticsearch query dict
+2. Correct use of V2Persons.V1Person.keyword for top-people aggregation
+3. Invalid LLM JSON raises QueryGenerationError
+4. Retrieved schema context is included in the LLM system prompt
+5. Empty schema context does not crash query generation
 """
 
 from __future__ import annotations
 
 import json
-import re
-import sys
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
 
 import pytest
 
 
-# -----------------------------
-# Path bootstrap (fix imports)
-# -----------------------------
-PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../ES-Chatbot
-_backend_dir = PROJECT_ROOT / "backend"
-for p in (PROJECT_ROOT, _backend_dir):
-    sp = str(p)
-    if sp not in sys.path:
-        sys.path.insert(0, sp)
-
-
-# -----------------------------
-# Fakes (no external deps)
-# -----------------------------
-@dataclass
-class _FakeLLMResponse:
-    content: str
-
-
 class _FakeLLM:
-    """
-    Minimal stub for whatever LLM wrapper your QueryGenerator uses.
-    It must expose `.invoke(messages)` and return an object with `.content`.
-    """
+    """Fake LLM returning a fixed `.content` string."""
 
     def __init__(self, content: str):
         self._content = content
+        self.last_messages = None
 
-    def invoke(self, messages: Any) -> _FakeLLMResponse:
-        return _FakeLLMResponse(self._content)
+    def invoke(self, messages):
+        self.last_messages = messages
+        return SimpleNamespace(content=self._content)
 
 
-class _FakeVectorStore:
+class _FakeSchemaStore:
+    """Fake schema store matching the newer async schema retrieval contract."""
+
+    def __init__(self, schema_docs=None, overview_docs=None):
+        self.schema_docs = schema_docs or []
+        self.overview_docs = overview_docs or []
+
+    async def search_schema(self, question: str, k: int = 8):
+        return self.schema_docs
+
+    async def get_schema_overview(self, limit: int = 12):
+        return self.overview_docs
+
+
+@pytest.mark.asyncio
+async def test_m2_query_generation_returns_valid_es_query_dict_for_top10_people_this_week(monkeypatch):
     """
-    Minimal stub for a vector store with `.similarity_search(question, k)`.
-    Returns objects with `.page_content`.
-    """
-
-    def similarity_search(self, question: str, k: int = 6):
-        class _Doc:
-            def __init__(self, page_content: str):
-                self.page_content = page_content
-
-        return [
-            _Doc("V2Persons.V1Person.keyword is a keyword field for terms aggregations."),
-            _Doc("V21Date is a date field used for time filtering."),
-        ]
-
-
-def test_m2_query_generation_returns_valid_es_query_dict_for_top10_people_this_week(monkeypatch):
-    """
-    Tests (Milestone 2 Acceptance):
-    - Asking: "Who are the top 10 people mentioned this week?"
-      returns a valid ES query JSON dict.
-    - Query uses V2Persons.V1Person.keyword in a terms aggregation.
-
-    What 'valid' means here:
-    - Python dict (not a string)
-    - Contains aggs with a terms aggregation using that keyword field
-    - Includes a time range filter (example uses now-7d/d)
+    Acceptance criteria:
+    - Asking "Who are the top 10 people mentioned this week?"
+      returns a valid ES query JSON dict
+    - Query uses V2Persons.V1Person.keyword in a terms aggregation
+    - Includes a time range filter
     """
     from services.query_generator import QueryGenerator
 
@@ -86,46 +62,199 @@ def test_m2_query_generation_returns_valid_es_query_dict_for_top10_people_this_w
         {
             "size": 0,
             "query": {
-                "bool": {"filter": [{"range": {"V21Date": {"gte": "now-7d/d", "lte": "now"}}}]}
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                "V21Date": {
+                                    "gte": "now-7d/d",
+                                    "lte": "now",
+                                }
+                            }
+                        }
+                    ]
+                }
             },
-            "aggs": {"top_people": {"terms": {"field": "V2Persons.V1Person.keyword", "size": 10}}},
+            "aggs": {
+                "top_people": {
+                    "terms": {
+                        "field": "V2Persons.V1Person.keyword",
+                        "size": 10,
+                    }
+                }
+            },
         }
     )
 
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", _FakeLLM(llm_json), raising=True)
-    monkeypatch.setattr(qg, "vectorstore", _FakeVectorStore(), raising=True)
 
-    query = qg.generate("Who are the top 10 people mentioned this week?", history=[])
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[
+            "Field: V21Date. Type: date. Usage: Use for date filtering.",
+            "Field: V2Persons.V1Person.keyword. Type: keyword. Usage: Use for exact matches and terms aggregations.",
+        ]
+    )
 
-    assert isinstance(query, dict)
-    assert query.get("size") == 0
-    assert "aggs" in query
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
 
-    # Ensure the expected field is used in a terms agg somewhere inside aggs
-    terms_aggs_text = json.dumps(query.get("aggs", {}))
-    assert "V2Persons.V1Person.keyword" in terms_aggs_text
-    assert re.search(r'"terms"\s*:\s*\{', terms_aggs_text), "No terms aggregation found"
+    result = await qg.generate("Who are the top 10 people mentioned this week?")
+
+    assert isinstance(result, dict)
+    assert "aggs" in result
+    assert "top_people" in result["aggs"]
+
+    terms = result["aggs"]["top_people"]["terms"]
+    assert terms["field"] == "V2Persons.V1Person.keyword"
+    assert terms["size"] == 10
+
+    assert "query" in result
+    filters = result["query"]["bool"]["filter"]
+    assert any("range" in item and "V21Date" in item["range"] for item in filters)
 
 
-def test_m2_invalid_llm_output_raises_query_generation_error(monkeypatch):
+@pytest.mark.asyncio
+async def test_m2_invalid_llm_output_raises_query_generation_error(monkeypatch):
     """
-    Tests (Milestone 2 Acceptance):
-    - If the LLM returns invalid JSON (even wrapped in code fences),
-      QueryGenerator must raise QueryGenerationError with a clear message.
-
-    Why this matters:
-    - Prevents passing malformed / unsafe payloads to later stages.
-    - Makes frontend UX clean: user gets a friendly error instead of a crash.
+    Acceptance criteria:
+    - If the LLM returns invalid JSON, QueryGenerator raises QueryGenerationError
     """
-    from services.query_generator import QueryGenerator, QueryGenerationError
+    from services.query_generator import QueryGenerationError, QueryGenerator
 
     qg = QueryGenerator()
     monkeypatch.setattr(qg, "llm", _FakeLLM("```json\n{not valid}\n```"), raising=True)
-    monkeypatch.setattr(qg, "vectorstore", _FakeVectorStore(), raising=True)
 
-    with pytest.raises(QueryGenerationError) as ei:
-        _ = qg.generate("Who are the top 10 people mentioned this week?", history=[])
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[
+            "Field: V21Date. Type: date.",
+            "Field: V2Persons.V1Person.keyword. Type: keyword.",
+        ]
+    )
 
-    msg = str(ei.value).lower()
-    assert any(k in msg for k in ["invalid", "json", "parse"]), f"Message not clear enough: {ei.value}"
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
+
+    with pytest.raises(QueryGenerationError) as exc_info:
+        await qg.generate("Who are the top 10 people mentioned this week?")
+
+    assert "Invalid JSON" in str(exc_info.value) or "valid JSON" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_m2_schema_context_is_included_in_prompt(monkeypatch):
+    """
+    Regression test for the schema-aware design:
+    verifies that retrieved schema context is inserted into the LLM system prompt.
+    """
+    from services.query_generator import QueryGenerator
+
+    llm_json = json.dumps(
+        {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                "V21Date": {
+                                    "gte": "now-7d/d",
+                                    "lte": "now",
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            "aggs": {
+                "top_people": {
+                    "terms": {
+                        "field": "V2Persons.V1Person.keyword",
+                        "size": 10,
+                    }
+                }
+            },
+        }
+    )
+
+    fake_llm = _FakeLLM(llm_json)
+    qg = QueryGenerator()
+    monkeypatch.setattr(qg, "llm", fake_llm, raising=True)
+
+    schema_context_docs = [
+        "Field: V2Persons.V1Person.keyword. Type: keyword. Usage: Use for exact matches and terms aggregations."
+    ]
+    fake_schema_store = _FakeSchemaStore(schema_docs=schema_context_docs)
+
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
+
+    await qg.generate("Who are the top 10 people mentioned this week?")
+
+    sent_messages = fake_llm.last_messages
+    assert isinstance(sent_messages, list)
+    assert len(sent_messages) >= 2
+
+    system_message = sent_messages[0]
+    assert system_message["role"] == "system"
+    assert schema_context_docs[0] in system_message["content"]
+
+
+@pytest.mark.asyncio
+async def test_m2_generate_can_use_empty_schema_context_without_crashing(monkeypatch):
+    """
+    If schema search returns nothing, QueryGenerator should fall back to overview
+    or continue without crashing.
+    """
+    from services.query_generator import QueryGenerator
+
+    llm_json = json.dumps(
+        {
+            "size": 0,
+            "query": {
+                "bool": {
+                    "filter": [
+                        {
+                            "range": {
+                                "V21Date": {
+                                    "gte": "now-7d/d",
+                                    "lte": "now",
+                                }
+                            }
+                        }
+                    ]
+                }
+            },
+            "aggs": {
+                "top_people": {
+                    "terms": {
+                        "field": "V2Persons.V1Person.keyword",
+                        "size": 10,
+                    }
+                }
+            },
+        }
+    )
+
+    qg = QueryGenerator()
+    monkeypatch.setattr(qg, "llm", _FakeLLM(llm_json), raising=True)
+
+    fake_schema_store = _FakeSchemaStore(
+        schema_docs=[],
+        overview_docs=["(no schema context available)"],
+    )
+
+    monkeypatch.setattr(
+        "services.query_generator.get_schema_store",
+        lambda: fake_schema_store,
+    )
+
+    result = await qg.generate("Who are the top 10 people mentioned this week?")
+    assert isinstance(result, dict)
+    assert result["aggs"]["top_people"]["terms"]["field"] == "V2Persons.V1Person.keyword"

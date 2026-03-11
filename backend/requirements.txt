@@ -5,7 +5,7 @@ pydantic-settings==2.7.1
 
 # Database Clients
 elasticsearch==8.17.0
-chromadb>=0.5.0,<0.6.0
+chromadb==0.5.18
 langchain-chroma==0.1.4
 
 # AI & Orchestration

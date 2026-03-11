@@ -30,4 +30,3 @@ venv/
 
 # ChromaDB data
 chromadb_data/
-chroma_db/
