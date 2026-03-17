@@ -1,194 +1,89 @@
-"""backend/services/response_summariser.py
-
-Turn shaped ES results into a natural-language answer using the configured LLM.
-The summariser now also receives stage_trace so the final answer stays consistent
-with the multi-stage pipeline that produced the final result.
-"""
-
 from __future__ import annotations
 
+import asyncio
 import json
-import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
-from openai import OpenAI
+from langchain_openai import ChatOpenAI
 
 from config import settings
 
-logger = logging.getLogger(__name__)
-
-
-class LLMError(RuntimeError):
-    pass
-
 
 class ResponseSummariser:
-    """Summarises shaped ES results using the LLM with a robust fallback."""
-
-    def __init__(
-        self,
-        *,
-        base_url: Optional[str] = None,
-        api_key: Optional[str] = None,
-        model_name: Optional[str] = None,
-        temperature: float = 0.2,
-        max_output_tokens: int = 1024,
-    ) -> None:
-        self.client = OpenAI(
-            base_url=base_url or settings.llm_base_url,
-            api_key=api_key or settings.llm_api_key,
+    def __init__(self) -> None:
+        self.llm = ChatOpenAI(
+            base_url=settings.llm_base_url,
+            api_key=settings.llm_api_key,
+            model=settings.llm_model_name,
+            temperature=0.2,
+            timeout=settings.llm_timeout_seconds,
         )
-        self.model_name = model_name or settings.llm_model_name
-        self.temperature = float(temperature)
-        self.max_output_tokens = int(max_output_tokens)
 
-    def summarize(
+    async def summarize(
         self,
         *,
         question: str,
         shaped_results: Dict[str, Any],
-        query_type: str,
-        stage_trace: Optional[List[Dict[str, Any]]] = None,
-    ) -> str:
-        """Return a user-facing summary.
-
-        Falls back to a lightweight heuristic summary if the LLM call fails.
-        """
-        try:
-            return self._llm_summary(
-                question=question,
-                shaped_results=shaped_results,
-                query_type=query_type,
-                stage_trace=stage_trace or [],
-            )
-        except Exception:
-            logger.exception("LLM summarisation failed; using fallback summary")
-            return self._fallback_summary(
-                question=question,
-                shaped_results=shaped_results,
-                query_type=query_type,
-                stage_trace=stage_trace or [],
-            )
-
-    def _llm_summary(
-        self,
-        *,
-        question: str,
-        shaped_results: Dict[str, Any],
-        query_type: str,
         stage_trace: List[Dict[str, Any]],
     ) -> str:
-        system = (
-            "You are an OSINT analyst assistant. "
-            "Summarise the provided results for the user's question. "
-            "Be factual and thorough. If multiple query attempts were executed, keep the final answer "
-            "consistent with the stage trace and final result. "
-            "Do not mention Elasticsearch, JSON, or internal implementation details. "
-            "If results are empty, say so clearly."
-        )
-
-        payload = {
+        prompt = {
             "question": question,
-            "query_type": query_type,
             "stage_trace": stage_trace,
             "results": shaped_results,
+            "instructions": [
+                "Answer the user directly.",
+                "Use only the final validated results.",
+                "Do not mention Elasticsearch, JSON, tools, or hidden reasoning.",
+                "If the system could not fully satisfy the requested count, say so clearly.",
+            ],
         }
-        user_content = "Here are the results as JSON:" + json.dumps(payload, ensure_ascii=False)
-
         try:
-            resp = self.client.chat.completions.create(
-                model=self.model_name,
-                temperature=self.temperature,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user_content},
+            response = await asyncio.to_thread(
+                self.llm.invoke,
+                [
+                    {
+                        "role": "system",
+                        "content": "You are an OSINT analyst assistant. Write a concise factual answer.",
+                    },
+                    {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
                 ],
-                max_tokens=self.max_output_tokens,
             )
-            content = (resp.choices[0].message.content or "").strip()
-            if not content:
-                raise LLMError("Empty chat-completions summary")
-            return content
+            content = getattr(response, "content", "")
+            if isinstance(content, list):
+                content = "\n".join(str(part) for part in content)
+            text = str(content).strip()
+            if text:
+                return text
         except Exception:
-            prompt = f"{system}\n\n{user_content}\n\nAnswer:"
-            resp = self.client.completions.create(
-                model=self.model_name,
-                temperature=self.temperature,
-                prompt=prompt,
-                max_tokens=self.max_output_tokens,
-            )
-            text_out = ""
-            if getattr(resp, "choices", None):
-                text_out = (resp.choices[0].text or "").strip()
-            if not text_out:
-                raise LLMError("Empty completions summary")
-            return text_out
+            pass
+        return self._fallback_summary(question=question, shaped_results=shaped_results)
 
-    def _fallback_summary(
-        self,
-        *,
-        question: str,
-        shaped_results: Dict[str, Any],
-        query_type: str,
-        stage_trace: List[Dict[str, Any]],
-    ) -> str:
-        if not isinstance(shaped_results, dict):
-            return "I couldn't summarise the results, but the query executed successfully."
+    def _fallback_summary(self, *, question: str, shaped_results: Dict[str, Any]) -> str:
+        validation = shaped_results.get("validation") or {}
+        aggs = shaped_results.get("aggregations") or {}
 
-        total = shaped_results.get("total_hits")
-        attempted_multiple = len(stage_trace) > 1
+        if isinstance(aggs, dict) and aggs:
+            first_name = next(iter(aggs.keys()))
+            buckets = aggs.get(first_name) or []
+            if isinstance(buckets, list) and buckets:
+                lines = []
 
-        if query_type == "aggregation":
-            aggs = shaped_results.get("aggregations")
-            if isinstance(aggs, dict) and aggs:
-                first_name = next(iter(aggs.keys()))
-                buckets = aggs.get(first_name)
-                if isinstance(buckets, list) and buckets:
-                    top = buckets[:10]
-                    lines = [f"Top results for '{first_name}':"]
-                    for i, bucket in enumerate(top, 1):
-                        key = bucket.get("key")
-                        cnt = bucket.get("doc_count")
-                        lines.append(f"{i}. {key} — {cnt}")
-                    if total is not None:
-                        lines.append(f"(Matched about {total} articles in total.)")
-                    return "\n".join(lines)
+                if validation and not validation.get("passed", True):
+                    lines.append(
+                        f"I could only validate {validation.get('valid_count', 0)} out of "
+                        f"{validation.get('requested_count', 0)} requested results."
+                    )
+                    lines.append("Here are the validated results I found:")
 
-            if attempted_multiple:
-                return (
-                    "I tried a few query strategies, but none produced aggregation buckets worth summarising. "
-                    "Try broadening the time range or simplifying the entity/keyword requested."
-                )
-            return "I ran the analysis, but there were no aggregation buckets to summarise."
+                else:
+                    lines.append(f"Results for: {question}")
 
-        docs = shaped_results.get("documents")
-        if isinstance(docs, list) and docs:
-            lines = ["Here are a few matching articles:"]
-            for d in docs[:5]:
-                if not isinstance(d, dict):
-                    continue
-                v2extras = d.get("V2ExtrasXML")
-                title = v2extras.get("Title") if isinstance(v2extras, dict) else d.get("V2ExtrasXML.Title")
-                url = d.get("V2DocId") or d.get("DocumentIdentifier") or d.get("url")
-                date = d.get("V21Date") or d.get("date")
-                parts = [p for p in [date, title, url] if p]
-                if parts:
-                    lines.append("- " + " | ".join(str(p) for p in parts))
-            if total is not None:
-                lines.append(f"(Matched about {total} articles in total.)")
-            return "\n".join(lines)
+                for idx, bucket in enumerate(buckets[:10], start=1):
+                    lines.append(f"{idx}. {bucket.get('key')} — {bucket.get('doc_count')}")
+                return "\n".join(lines)
 
-        if isinstance(total, int) and total > 0:
-            if attempted_multiple:
-                return (
-                    f"I tried multiple query strategies and found about {total} matching articles, "
-                    "but there were no document previews to show in the final result."
-                )
-            return f"The query matched about {total} articles, but there were no document previews to summarise."
+        docs = shaped_results.get("documents") or []
+        if docs:
+            return f"I found {len(docs)} matching documents for: {question}"
 
-        if attempted_multiple:
-            return (
-                "I tried a few query strategies, but none returned useful results. "
-                "Try broadening the time range or using a different keyword."
-            )
-        return "No matching articles were found for that question. Try broadening the time range or using a different keyword."
+        return "I could not find validated results that fully satisfy the request."

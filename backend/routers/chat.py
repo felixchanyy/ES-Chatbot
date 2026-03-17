@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
-from config import settings
 from models.schemas import ChatRequest, ChatResponse, QueryMetadata
+from services.react_agent import ReActGDELTAgentService
+
+router = APIRouter()
+logger = logging.getLogger(__name__)
+agent_service = ReActGDELTAgentService()
 from services.context_manager import ContextManager
 from services.es_client import es_client
 from services.query_generator import QueryGenerationError, QueryGenerator
@@ -23,20 +25,10 @@ summariser = ResponseSummariser()
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    """Multi-stage chat pipeline.
-
-    Updated behaviour:
-    - keeps state across attempts
-    - retries when a query returns no useful results
-    - avoids duplicate follow-up queries
-    - falls back safely if a stage fails
-    """
-
-    session_id = request.session_id
-    logger.info("chat_request_received", extra={"session_id": session_id})
-
+async def chat(request: ChatRequest) -> ChatResponse:
+    logger.info("chat_request_received", extra={"session_id": request.session_id})
     history = [item.model_dump() for item in request.history]
+    result = await agent_service.run(question=request.message, history=history)
     observations: List[str] = []
     attempts: List[Dict[str, Any]] = []
     seen_queries: set[str] = set()
@@ -229,75 +221,16 @@ async def chat(request: ChatRequest):
     took_ms = shaped.get("took_ms")
 
     return ChatResponse(
-        response=answer,
+        response=result["response"],
         query_metadata=QueryMetadata(
-            es_query=final_attempt["query"],
-            total_hits=total_hits,
-            execution_time_ms=took_ms,
-            safety_status=final_attempt["safety_status"],
-            blocked_reason=final_attempt["safety_reason"],
+            es_query=result["es_query"],
+            total_hits=result["total_hits"],
+            execution_time_ms=result["execution_time_ms"],
+            safety_status=result["safety_status"],
+            blocked_reason=result["blocked_reason"],
+            attempts=result["attempts"],
+            validator_reason=result["validator_reason"],
+            stage_trace=result["stage_trace"],
         ),
-        session_id=session_id,
+        session_id=request.session_id,
     )
-
-
-def _canonical_query(query: Dict[str, Any]) -> str:
-    return json.dumps(query, sort_keys=True, ensure_ascii=False)
-
-
-def _infer_query_type(query: Dict[str, Any]) -> str:
-    return "aggregation" if bool(query.get("aggs") or query.get("aggregations")) else "retrieval"
-
-
-def _has_useful_results(shaped: Dict[str, Any], query_type: str) -> bool:
-    if not isinstance(shaped, dict) or shaped.get("error"):
-        return False
-
-    if query_type == "aggregation":
-        return _has_non_empty_buckets(shaped.get("aggregations"))
-
-    docs = shaped.get("documents") or []
-    total_hits = shaped.get("total_hits")
-    return bool(docs) or (isinstance(total_hits, int) and total_hits > 0)
-
-
-def _has_non_empty_buckets(node: Any) -> bool:
-    if isinstance(node, list):
-        return len(node) > 0
-    if isinstance(node, dict):
-        return any(_has_non_empty_buckets(value) for value in node.values())
-    return False
-
-
-def _score_attempt(attempt: Dict[str, Any]) -> int:
-    shaped = attempt.get("shaped") if isinstance(attempt.get("shaped"), dict) else {}
-    if attempt.get("query_type") == "aggregation":
-        return 100 if _has_non_empty_buckets(shaped.get("aggregations")) else 0
-    docs = shaped.get("documents") or []
-    total_hits = shaped.get("total_hits") or 0
-    return len(docs) * 10 + int(total_hits)
-
-
-def _build_stage_observation(
-    *,
-    attempt_no: int,
-    query: Dict[str, Any],
-    shaped: Dict[str, Any],
-    query_type: str,
-) -> str:
-    if not isinstance(shaped, dict):
-        return f"Attempt {attempt_no}: result shaping failed."
-
-    if query_type == "aggregation":
-        has_buckets = _has_non_empty_buckets(shaped.get("aggregations"))
-        if has_buckets:
-            return f"Attempt {attempt_no}: aggregation query returned non-empty buckets."
-        return f"Attempt {attempt_no}: aggregation query returned no buckets; consider broader filters or a wider time range."
-
-    total_hits = shaped.get("total_hits")
-    docs = shaped.get("documents") or []
-    if docs:
-        return f"Attempt {attempt_no}: retrieval query returned {len(docs)} documents and about {total_hits} total hits."
-    if isinstance(total_hits, int) and total_hits > 0:
-        return f"Attempt {attempt_no}: query matched about {total_hits} hits but returned no document previews."
-    return f"Attempt {attempt_no}: query returned zero useful results; simplify the query or broaden the time window."

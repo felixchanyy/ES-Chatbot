@@ -1,39 +1,40 @@
-# backend/models/schemas.py
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
-from typing import Literal, List, Dict, Optional
+
 
 class HistoryItem(BaseModel):
     role: Literal["user", "assistant"]
     content: str
 
+
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=1000)
     session_id: str = Field(..., description="UUID identifying the chat session")
-    history: List[HistoryItem] = Field(default_factory=list, max_length=20)
+    history: List[HistoryItem] = Field(default_factory=list, max_length=30)
+
 
 class QueryMetadata(BaseModel):
-    es_query: Optional[Dict] = Field(None, description="The ES query that was executed")
+    es_query: Optional[Dict[str, Any]] = None
     total_hits: Optional[int] = None
     execution_time_ms: Optional[int] = None
     safety_status: Literal["allowed", "blocked", "modified", "failed", "error"]
     blocked_reason: Optional[str] = None
+    attempts: int = 0
+    validator_reason: Optional[str] = None
+    stage_trace: List[Dict[str, Any]] = Field(default_factory=list)
+
 
 class ChatResponse(BaseModel):
-    response: str = Field(..., description="Natural language response from the LLM")
+    response: str
     query_metadata: QueryMetadata
     session_id: str
 
-# class IndexStats(BaseModel):
-#     total_documents: int
-#     index_size_bytes: int
-#     earliest_date: str
-#     latest_date: str
-#     top_sources: List[Dict]
 
 class SourceCount(BaseModel):
     source: str
     count: int
+
 
 class IndexStats(BaseModel):
     total_documents: int

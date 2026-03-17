@@ -1,5 +1,3 @@
-# backend/services/es_client.py
-
 from __future__ import annotations
 
 from typing import Any, Dict
@@ -10,17 +8,14 @@ from config import settings
 
 
 class ESClient:
-    """Thin wrapper around AsyncElasticsearch.
-
-    The helper methods normalise Elasticsearch 8.x Response objects into plain dicts
-    so the rest of the code can safely call .get(...) without version-specific issues.
-    """
+    """Thin wrapper around AsyncElasticsearch with response normalisation."""
 
     def __init__(self) -> None:
         self.client = AsyncElasticsearch(
             hosts=[settings.es_host],
             basic_auth=(settings.es_username, settings.es_password),
             verify_certs=settings.es_verify_ssl,
+            request_timeout=settings.es_request_timeout_seconds,
         )
         
     async def ping(self) -> bool:
@@ -31,34 +26,23 @@ class ESClient:
     def _to_dict(response: Any) -> Dict[str, Any]:
         return response.body if hasattr(response, "body") else response
 
-    async def search(self, index: str, query: dict) -> Dict[str, Any]:
+    async def search(self, index: str, query: Dict[str, Any]) -> Dict[str, Any]:
         response = await self.client.search(index=index, body=query)
         return self._to_dict(response)
 
     async def get_index_mapping(self, index: str | None = None) -> Dict[str, Any]:
-        """Return the raw mapping document for the configured index."""
         response = await self.client.indices.get_mapping(index=index or settings.es_index)
         return self._to_dict(response)
 
-    async def get_index_stats(self) -> dict:
-        """Return summary statistics about the configured index."""
-
+    async def get_index_stats(self) -> Dict[str, Any]:
         count_resp = self._to_dict(await self.client.count(index=settings.es_index))
         total_docs = count_resp.get("count", 0)
 
         stats_resp = self._to_dict(
-            await self.client.indices.stats(
-                index=settings.es_index,
-                metric="store",
-            )
+            await self.client.indices.stats(index=settings.es_index, metric="store")
         )
-
         index_data = stats_resp.get("indices", {}).get(settings.es_index, {})
-        size_bytes = (
-            index_data.get("total", {})
-            .get("store", {})
-            .get("size_in_bytes", 0)
-        )
+        size_bytes = index_data.get("total", {}).get("store", {}).get("size_in_bytes", 0)
 
         agg_resp = self._to_dict(
             await self.client.search(
@@ -79,18 +63,16 @@ class ESClient:
         )
 
         aggs = agg_resp.get("aggregations", {})
-        earliest = aggs.get("earliest_date", {}).get("value_as_string")
-        latest = aggs.get("latest_date", {}).get("value_as_string")
-
-        buckets = aggs.get("top_sources", {}).get("buckets", [])
-        top_sources = [
-            {"source": bucket["key"], "count": bucket["doc_count"]}
-            for bucket in buckets
-        ]
-
         return {
             "total_documents": total_docs,
             "index_size_bytes": size_bytes,
+            "earliest_date": aggs.get("earliest_date", {}).get("value_as_string"),
+            "latest_date": aggs.get("latest_date", {}).get("value_as_string"),
+            "top_sources": [
+                {"source": bucket["key"], "count": bucket["doc_count"]}
+                for bucket in aggs.get("top_sources", {}).get("buckets", [])
+            ],
+        }
             "earliest_date": earliest,
             "latest_date": latest,
             "top_sources": top_sources,
