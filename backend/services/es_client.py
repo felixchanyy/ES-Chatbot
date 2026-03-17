@@ -73,10 +73,6 @@ class ESClient:
                 for bucket in aggs.get("top_sources", {}).get("buckets", [])
             ],
         }
-            "earliest_date": earliest,
-            "latest_date": latest,
-            "top_sources": top_sources,
-        }
     
 # Create a single global instance
 es_client = ESClient()

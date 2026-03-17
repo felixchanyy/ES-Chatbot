@@ -4,6 +4,7 @@ import requests
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.concurrency import run_in_threadpool
 
 from config import settings
 from routers import chat, index
@@ -37,13 +38,18 @@ async def startup_event() -> None:
     except Exception:
         logger.exception("startup_schema_sync_failed")
 
+async def _check_elasticsearch() -> bool:
+    try:
+        return await es_client.ping()
+    except Exception:
+        return False
+    
 def _check_llm() -> bool:
     try:
         response = requests.get(f"{settings.llm_base_url}/models", timeout=5)
         return response.status_code == 200
     except Exception:
         return False
-
 
 def _check_chromadb() -> bool:
     try:
@@ -57,10 +63,10 @@ def _check_chromadb() -> bool:
 
 
 @app.get("/health")
-def health_check() -> dict:
-    es_ok = _check_elasticsearch()
-    llm_ok = _check_llm()
-    chroma_ok = _check_chromadb()
+async def health_check() -> dict:
+    es_ok = await _check_elasticsearch()
+    llm_ok = await run_in_threadpool(_check_llm)
+    chroma_ok = await run_in_threadpool(_check_chromadb)
     overall_ok = es_ok and llm_ok and chroma_ok
     return {
         "status": "ok" if overall_ok else "degraded",
