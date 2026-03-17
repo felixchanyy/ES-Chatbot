@@ -1,7 +1,6 @@
 import logging
 
 import requests
-from elasticsearch import Elasticsearch
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -9,6 +8,7 @@ from fastapi.responses import JSONResponse
 from config import settings
 from routers import chat, index
 from services.schema_store import get_schema_store
+from services.es_client import es_client
 
 logger = logging.getLogger(__name__)
 
@@ -36,20 +36,6 @@ async def startup_event() -> None:
         await schema_store.ensure_schema_collection_synced(force=False)
     except Exception:
         logger.exception("startup_schema_sync_failed")
-
-
-def _check_elasticsearch() -> bool:
-    try:
-        es = Elasticsearch(
-            settings.es_host,
-            basic_auth=(settings.es_username, settings.es_password),
-            verify_certs=settings.es_verify_ssl,
-            request_timeout=5,
-        )
-        return bool(es.ping())
-    except Exception:
-        return False
-
 
 def _check_llm() -> bool:
     try:

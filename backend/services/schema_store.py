@@ -9,7 +9,7 @@ import chromadb
 from langchain_huggingface import HuggingFaceEmbeddings
 
 from config import settings
-from services.es_client import ESClient
+from services.es_client import es_client
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ class SchemaStore:
     """Synchronise the Elasticsearch mapping into Chroma for schema retrieval."""
 
     def __init__(self) -> None:
-        self.es = ESClient()
+        self.es = es_client
         self.embeddings = HuggingFaceEmbeddings(model_name=settings.schema_embedding_model)
         self.client: Optional[chromadb.HttpClient] = None
         self.collection = None
@@ -31,10 +31,16 @@ class SchemaStore:
                 ssl=settings.chroma_ssl,
             )
         if self.collection is None:
-            self.collection = self.client.get_or_create_collection(
-                name=settings.chroma_collection,
-                metadata={"source": "elasticsearch_schema", "index": settings.es_index},
-            )
+            try:
+                self.collection = self.client.get_or_create_collection(
+                    name=settings.chroma_collection,
+                    metadata={"source": "elasticsearch_schema", "index": settings.es_index},
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Unable to access the Chroma collection. "
+                    "The server may be running an older API version without required v2 routes."
+                ) from exc
 
     async def ensure_schema_collection_synced(self, force: bool = False) -> None:
         await asyncio.to_thread(self._ensure_client_and_collection)

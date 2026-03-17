@@ -17,6 +17,10 @@ class ESClient:
             verify_certs=settings.es_verify_ssl,
             request_timeout=settings.es_request_timeout_seconds,
         )
+        
+    async def ping(self) -> bool:
+        """Ping the cluster to check health using the existing connection pool."""
+        return await self.client.ping()
 
     @staticmethod
     def _to_dict(response: Any) -> Dict[str, Any]:
@@ -69,3 +73,10 @@ class ESClient:
                 for bucket in aggs.get("top_sources", {}).get("buckets", [])
             ],
         }
+            "earliest_date": earliest,
+            "latest_date": latest,
+            "top_sources": top_sources,
+        }
+    
+# Create a single global instance
+es_client = ESClient()

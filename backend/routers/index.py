@@ -1,7 +1,7 @@
 from fastapi import APIRouter
 
 from models.schemas import IndexStats
-from services.es_client import ESClient
+from services.es_client import es_client 
 
 router = APIRouter()
 
